@@ -214,6 +214,7 @@ func (s stage) createPartitions(config types.Config) error {
 					Label:    string(part.Label),
 					TypeGUID: string(part.TypeGUID),
 					GUID:     string(part.GUID),
+					Bootable: part.Bootable,
 				})
 			}
 
