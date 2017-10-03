@@ -95,7 +95,7 @@ func (n Disk) partitionsOverlap() bool {
 		}
 
 		for _, o := range n.Partitions {
-			if p == o || o.Start == 0 {
+			if p.Equal(o) || o.Start == 0 {
 				continue
 			}
 

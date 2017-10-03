@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"syscall"
@@ -26,6 +27,7 @@ import (
 	"github.com/coreos/ignition/config/types"
 	"github.com/coreos/ignition/internal/exec/stages"
 	"github.com/coreos/ignition/internal/exec/util"
+	"github.com/coreos/ignition/internal/image"
 	"github.com/coreos/ignition/internal/log"
 	"github.com/coreos/ignition/internal/resource"
 	internalUtil "github.com/coreos/ignition/internal/util"
@@ -99,7 +101,11 @@ func (s stage) createFilesystemsEntries(config types.Config) error {
 		return err
 	}
 
-	for fs, f := range entryMap {
+	for _, fs := range config.Storage.Filesystems {
+                f := entryMap[fs.Name]
+		if f == nil {
+			f = []filesystemEntry{}
+		}
 		if err := s.createEntries(fs, f); err != nil {
 			return fmt.Errorf("failed to create files: %v", err)
 		}
@@ -223,16 +229,16 @@ func (lst ByDirectorySegments) Less(i, j int) bool {
 	return lst[i].Depth() < lst[j].Depth()
 }
 
-// mapEntriesToFilesystems builds a map of filesystems to files. If multiple
+// mapEntriesToFilesystems builds a map of filesystem names to files. If multiple
 // definitions of the same filesystem are present, only the final definition is
 // used. The directories are sorted to ensure /foo gets created before /foo/bar.
-func (s stage) mapEntriesToFilesystems(config types.Config) (map[types.Filesystem][]filesystemEntry, error) {
+func (s stage) mapEntriesToFilesystems(config types.Config) (map[string][]filesystemEntry, error) {
 	filesystems := map[string]types.Filesystem{}
 	for _, fs := range config.Storage.Filesystems {
 		filesystems[fs.Name] = fs
 	}
 
-	entryMap := map[types.Filesystem][]filesystemEntry{}
+	entryMap := map[string][]filesystemEntry{}
 
 	// Sort directories to ensure /a gets created before /a/b.
 	sortedDirs := config.Storage.Directories
@@ -241,7 +247,7 @@ func (s stage) mapEntriesToFilesystems(config types.Config) (map[types.Filesyste
 	// Add directories first to ensure they are created before files.
 	for _, d := range sortedDirs {
 		if fs, ok := filesystems[d.Filesystem]; ok {
-			entryMap[fs] = append(entryMap[fs], dirEntry(d))
+			entryMap[fs.Name] = append(entryMap[fs.Name], dirEntry(d))
 		} else {
 			s.Logger.Crit("the filesystem (%q), was not defined", d.Filesystem)
 			return nil, ErrFilesystemUndefined
@@ -250,7 +256,7 @@ func (s stage) mapEntriesToFilesystems(config types.Config) (map[types.Filesyste
 
 	for _, f := range config.Storage.Files {
 		if fs, ok := filesystems[f.Filesystem]; ok {
-			entryMap[fs] = append(entryMap[fs], fileEntry(f))
+			entryMap[fs.Name] = append(entryMap[fs.Name], fileEntry(f))
 		} else {
 			s.Logger.Crit("the filesystem (%q), was not defined", f.Filesystem)
 			return nil, ErrFilesystemUndefined
@@ -259,7 +265,7 @@ func (s stage) mapEntriesToFilesystems(config types.Config) (map[types.Filesyste
 
 	for _, sy := range config.Storage.Links {
 		if fs, ok := filesystems[sy.Filesystem]; ok {
-			entryMap[fs] = append(entryMap[fs], linkEntry(sy))
+			entryMap[fs.Name] = append(entryMap[fs.Name], linkEntry(sy))
 		} else {
 			s.Logger.Crit("the filesystem (%q), was not defined", sy.Filesystem)
 			return nil, ErrFilesystemUndefined
@@ -287,13 +293,27 @@ func (s stage) createEntries(fs types.Filesystem, files []filesystemEntry) error
 		format := string(fs.Mount.Format)
 
 		if err := s.Logger.LogOp(
-			func() error { return syscall.Mount(dev, mnt, format, 0, "") },
+			func() error {
+				if format != "ntfs" {
+					return syscall.Mount(dev, mnt, format, 0, "")
+				}
+				cmd := fmt.Sprintf("mount -t ntfs %s %s", dev, mnt)
+				_, err := exec.Command("bash", "-c", cmd).Output()
+				return err
+			},
 			"mounting %q at %q", dev, mnt,
 		); err != nil {
 			return fmt.Errorf("failed to mount device %q at %q: %v", dev, mnt, err)
 		}
 		defer s.Logger.LogOp(
-			func() error { return syscall.Unmount(mnt, 0) },
+			func() error {
+				if format != "ntfs" {
+					return syscall.Unmount(mnt, 0) 
+				}
+				cmd := fmt.Sprintf("umount %s", mnt)
+				_, err := exec.Command("bash", "-c", cmd).Output()
+				return err
+			},
 			"unmounting %q at %q", dev, mnt,
 		)
 	} else {
@@ -304,6 +324,12 @@ func (s stage) createEntries(fs types.Filesystem, files []filesystemEntry) error
 		DestDir: mnt,
 		Fetcher: s.Util.Fetcher,
 		Logger:  s.Logger,
+	}
+
+	for _, img := range fs.Images {
+		if err := image.ApplyImage(s.Logger, img, mnt); err != nil {
+			return err
+		}
 	}
 
 	for _, e := range files {
