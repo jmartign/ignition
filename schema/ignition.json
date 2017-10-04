@@ -312,6 +312,9 @@
             "resizeFilesystem": {
               "type": "boolean"
             },
+            "bootFilesystem": {
+              "type": "boolean"
+            },
             "label": {
               "type": ["string", "null"]
             },
